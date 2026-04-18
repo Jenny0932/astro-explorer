@@ -1,6 +1,8 @@
 # Astro Explorer
 
-Explore iconic JWST press-release imagery with classical-CV anomaly detection and astronomy learning links.
+Explore the universe via three complementary feeds — curated JWST press-release
+imagery, NASA's Astronomy Picture of the Day, and live ZTF transient alerts —
+all with classical-CV anomaly detection and astronomy learning links.
 
 ## Run
 
@@ -28,26 +30,46 @@ npm install   # first time only
 npm run dev
 ```
 
-## How it works
+## Development
 
-- `GET /api/targets` — 5 curated JWST targets with educational blurbs and topic tags.
-- `GET /api/targets/{id}/image` — proxy that returns the NASA/STScI/ESA press-release
-  color image (hosted on Wikimedia Commons). Served through the backend so the
-  frontend stays on one origin and images are cached in memory.
-- `GET /api/targets/{id}/anomalies?fwhm=3&nsigma=5` — grayscale-converts the image,
-  estimates the sky background with `sigma_clipped_stats`, runs `DAOStarFinder`,
-  and ranks sources by `0.7·flux_z + 0.3·sharpness_z`. Returns up to the top 50.
+Install [pre-commit](https://pre-commit.com) hooks to run ruff (backend), ESLint
+and `tsc` (frontend), and general file hygiene checks on every commit:
 
-The UI draws circles over detected sources (top 5 in red with rank labels,
-rest in yellow) and shows a table of the top 10 with flux/sharpness/score.
+```bash
+uv tool install pre-commit   # or: brew install pre-commit
+pre-commit install
+pre-commit run --all-files   # optional: run against the whole repo
+```
 
-## Targets
+See `.pre-commit-config.yaml` for the hook definitions.
 
-1. SMACS 0723 — Webb's First Deep Field
-2. Cosmic Cliffs — Carina Nebula (NGC 3324)
-3. Southern Ring Nebula (NGC 3132)
-4. Stephan's Quintet
-5. Pillars of Creation
+## Three feeds
+
+- **⭐ Featured JWST** — 5 curated press-release images (Wikimedia-hosted):
+  SMACS 0723, Cosmic Cliffs (NGC 3324), Southern Ring Nebula, Stephan's Quintet,
+  Pillars of Creation.
+- **🗓️ Daily (APOD)** — last 30 days of NASA's Astronomy Picture of the Day.
+  Updates daily with an expert-written explanation for each image.
+- **🌟 Transients (ZTF)** — recent Zwicky Transient Facility alerts via the
+  [ALeRCE broker](https://alerce.online). Shows the classic 3-panel cutout:
+  science (current sky), template (historical reference), and difference
+  (what's new). Anomaly detection runs on whichever panel you select — the
+  difference image is where brand-new supernovae stand out most clearly.
+
+## API
+
+- `GET /api/targets`, `GET /api/targets/{id}/{image,anomalies}`
+- `GET /api/apod?days=30`, `GET /api/apod/{date}/{image,anomalies}`
+- `GET /api/transients?limit=24`,
+  `GET /api/transients/{oid}/{candid,stamp/{kind},anomalies}` where
+  `kind ∈ {science, template, difference}`
+
+All image endpoints proxy through the backend so the browser stays on one
+origin. Anomaly detection converts to grayscale, estimates the sky background
+with `astropy.stats.sigma_clipped_stats`, runs `photutils.DAOStarFinder`, and
+ranks sources by `0.7·flux_z + 0.3·sharpness_z`. Returns the top 50.
+
+Set `NASA_API_KEY=…` to lift the APOD rate limit above `DEMO_KEY`'s 50/day.
 
 ## Project layout
 
@@ -64,10 +86,12 @@ astro-explorer/
 
 ## Notes
 
-- Anomaly detection runs on the 2D grayscale of the press-release JPG/PNG. That
-  means "flux" here is pixel intensity after color-composite processing — not a
-  calibrated astrophysical measurement. Good enough to spot bright stars,
-  diffraction spikes, compact galaxies, and visually unusual features.
-- To work with calibrated science data (real fluxes, WCS coordinates, multi-filter
-  composites), the next step is fetching `*_i2d.fits` from MAST and rendering with
-  an asinh stretch in the backend.
+- "Flux" on press-release images is pixel intensity after color-composite
+  processing — not a calibrated astrophysical measurement. Good enough to spot
+  bright stars, diffraction spikes, compact galaxies, and visually unusual
+  features. ZTF difference cutouts are closer to real science-grade pixels.
+- ZTF data is public and hosted by ALeRCE; their list endpoint can be slow (~2s
+  for the first uncached hit). Results are cached for 30 min on our side.
+- Next steps: fetch calibrated `*_i2d.fits` from MAST and render with an asinh
+  stretch for true multi-filter composites; hook TNS for named supernovae with
+  spectroscopic confirmations.

@@ -16,6 +16,20 @@ type ApodEntry = {
   copyright?: string
 }
 
+type Transient = {
+  oid: string
+  class: string
+  classifier: string
+  probability: number
+  ndet: number
+  firstmjd: number
+  lastmjd: number
+  ra: number
+  dec: number
+}
+
+type StampKind = 'science' | 'template' | 'difference'
+
 type Source = {
   x: number
   y: number
@@ -30,44 +44,35 @@ type AnomalyResponse = {
   image_height: number
   params: { fwhm: number; nsigma: number }
   sources: Source[]
+  kind?: StampKind
 }
 
 type Selected =
   | { kind: 'target'; target: Target }
   | { kind: 'apod'; apod: ApodEntry }
+  | { kind: 'transient'; transient: Transient }
 
-type Tab = 'featured' | 'daily'
+type Tab = 'featured' | 'daily' | 'transients'
 
-function selectedImageUrl(s: Selected): string {
-  return s.kind === 'target'
-    ? `/api/targets/${s.target.id}/image`
-    : `/api/apod/${s.apod.date}/image`
-}
+const STAMP_KINDS: StampKind[] = ['science', 'template', 'difference']
 
-function selectedAnomaliesUrl(s: Selected): string {
-  return s.kind === 'target'
-    ? `/api/targets/${s.target.id}/anomalies`
-    : `/api/apod/${s.apod.date}/anomalies`
-}
-
-function selectedTitle(s: Selected): string {
-  return s.kind === 'target' ? s.target.name : s.apod.title
-}
-
-function selectedBlurb(s: Selected): string {
-  return s.kind === 'target' ? s.target.blurb : s.apod.explanation
-}
-
-function selectedTopics(s: Selected): string[] {
-  return s.kind === 'target' ? s.target.topics : []
+function mjdToDate(mjd: number): string {
+  // MJD 0 = 1858-11-17 00:00 UTC
+  const ms = (mjd - 40587) * 86400 * 1000  // 40587 = MJD of 1970-01-01
+  return new Date(ms).toISOString().slice(0, 10)
 }
 
 function App() {
   const [tab, setTab] = useState<Tab>('featured')
   const [targets, setTargets] = useState<Target[]>([])
   const [apod, setApod] = useState<ApodEntry[]>([])
-  const [apodLoading, setApodLoading] = useState(false)
+  const [apodFetched, setApodFetched] = useState(false)
+  const [transients, setTransients] = useState<Transient[]>([])
+  const [transientsFetched, setTransientsFetched] = useState(false)
+  const apodLoading = tab === 'daily' && !apodFetched
+  const transientsLoading = tab === 'transients' && !transientsFetched
   const [selected, setSelected] = useState<Selected | null>(null)
+  const [stampKind, setStampKind] = useState<StampKind>('difference')
   const [anomalies, setAnomalies] = useState<AnomalyResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -83,20 +88,41 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (tab !== 'daily' || apod.length > 0) return
-    setApodLoading(true)
+    if (tab !== 'daily' || apodFetched) return
     fetch('/api/apod?days=30')
       .then((r) => r.json())
       .then((data: ApodEntry[]) => setApod(data))
       .catch((e) => setError(String(e)))
-      .finally(() => setApodLoading(false))
-  }, [tab, apod.length])
+      .finally(() => setApodFetched(true))
+  }, [tab, apodFetched])
+
+  useEffect(() => {
+    if (tab !== 'transients' || transientsFetched) return
+    fetch('/api/transients?limit=24')
+      .then((r) => r.json())
+      .then(setTransients)
+      .catch((e) => setError(String(e)))
+      .finally(() => setTransientsFetched(true))
+  }, [tab, transientsFetched])
 
   const selectItem = (s: Selected) => {
     setSelected(s)
     setAnomalies(null)
     setError(null)
     setImgSize({ w: 0, h: 0 })
+    if (s.kind === 'transient') setStampKind('difference')
+  }
+
+  const imageUrlFor = (s: Selected, k: StampKind = stampKind): string => {
+    if (s.kind === 'target') return `/api/targets/${s.target.id}/image`
+    if (s.kind === 'apod') return `/api/apod/${s.apod.date}/image`
+    return `/api/transients/${s.transient.oid}/stamp/${k}`
+  }
+
+  const anomaliesUrlFor = (s: Selected, k: StampKind = stampKind): string => {
+    if (s.kind === 'target') return `/api/targets/${s.target.id}/anomalies`
+    if (s.kind === 'apod') return `/api/apod/${s.apod.date}/anomalies`
+    return `/api/transients/${s.transient.oid}/anomalies?kind=${k}`
   }
 
   const runAnomalyDetection = async () => {
@@ -108,7 +134,7 @@ function App() {
     setLoading(true)
     setError(null)
     try {
-      const r = await fetch(selectedAnomaliesUrl(selected))
+      const r = await fetch(anomaliesUrlFor(selected))
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       const data = (await r.json()) as AnomalyResponse
       setAnomalies(data)
@@ -137,7 +163,28 @@ function App() {
       ? `t-${selected.target.id}`
       : selected?.kind === 'apod'
         ? `a-${selected.apod.date}`
-        : null
+        : selected?.kind === 'transient'
+          ? `x-${selected.transient.oid}`
+          : null
+
+  // Title/blurb/topics per selected kind ---------------------------------------
+  const title = !selected
+    ? ''
+    : selected.kind === 'target'
+      ? selected.target.name
+      : selected.kind === 'apod'
+        ? selected.apod.title
+        : `${selected.transient.oid} — ${selected.transient.class}`
+
+  const blurb = !selected
+    ? ''
+    : selected.kind === 'target'
+      ? selected.target.blurb
+      : selected.kind === 'apod'
+        ? selected.apod.explanation
+        : `A ZTF transient classified as ${selected.transient.class} (${(selected.transient.probability * 100).toFixed(0)}% confidence by ${selected.transient.classifier}). ${selected.transient.ndet} detections between ${mjdToDate(selected.transient.firstmjd)} and ${mjdToDate(selected.transient.lastmjd)}. The three cutouts show, left to right: the science image (current sky), the template (historical reference), and the difference (what's new). Bright sources in the difference image are what changed.`
+
+  const topics = selected?.kind === 'target' ? selected.target.topics : []
 
   return (
     <div className="app">
@@ -159,7 +206,13 @@ function App() {
           className={tab === 'daily' ? 'tab active' : 'tab'}
           onClick={() => setTab('daily')}
         >
-          🗓️ Daily from Space (APOD)
+          🗓️ Daily (APOD)
+        </button>
+        <button
+          className={tab === 'transients' ? 'tab active' : 'tab'}
+          onClick={() => setTab('transients')}
+        >
+          🌟 Transients (ZTF)
         </button>
       </div>
 
@@ -219,6 +272,34 @@ function App() {
               </div>
             </>
           )}
+
+          {tab === 'transients' && (
+            <>
+              <h2>Recent Transients</h2>
+              {transientsLoading && (
+                <p className="muted">Loading ZTF alerts…</p>
+              )}
+              <ul>
+                {transients.map((t) => (
+                  <li
+                    key={t.oid}
+                    className={selectedKey === `x-${t.oid}` ? 'active' : ''}
+                    onClick={() => selectItem({ kind: 'transient', transient: t })}
+                  >
+                    <div className="tr-row">
+                      <strong>{t.oid}</strong>
+                      <span className={`tag class-${(t.class || '').replace(/[^a-z0-9]/gi, '')}`}>
+                        {t.class}
+                      </span>
+                    </div>
+                    <div className="muted tr-meta">
+                      last {mjdToDate(t.lastmjd)} · {t.ndet} dets
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </aside>
 
         <main className="viewer">
@@ -227,23 +308,81 @@ function App() {
               <p>
                 {tab === 'featured'
                   ? 'Select a target from the left to begin.'
-                  : 'Select a day from the left to begin.'}
+                  : tab === 'daily'
+                    ? 'Select a day from the left to begin.'
+                    : 'Select a transient from the left to begin.'}
               </p>
             </div>
           )}
 
           {selected && (
             <>
-              <h2>{selectedTitle(selected)}</h2>
+              <h2>{title}</h2>
               {selected.kind === 'apod' && (
                 <p className="muted">
                   {selected.apod.date}
                   {selected.apod.copyright ? ` · © ${selected.apod.copyright}` : ''}
                 </p>
               )}
-              <p className="blurb">{selectedBlurb(selected)}</p>
+              {selected.kind === 'transient' && (
+                <p className="muted">
+                  RA {selected.transient.ra.toFixed(4)}°, Dec {selected.transient.dec.toFixed(4)}°
+                </p>
+              )}
+              <p className="blurb">{blurb}</p>
 
-              {selected.kind === 'apod' && selected.apod.media_type !== 'image' ? (
+              {selected.kind === 'transient' ? (
+                <>
+                  <div className="stamp-row">
+                    {STAMP_KINDS.map((k) => (
+                      <div
+                        key={k}
+                        className={`stamp ${stampKind === k ? 'selected' : ''}`}
+                        onClick={() => {
+                          setStampKind(k)
+                          setAnomalies(null)
+                          setImgSize({ w: 0, h: 0 })
+                        }}
+                      >
+                        <div className="stamp-label">{k}</div>
+                        <div className="stamp-img-wrap">
+                          <img
+                            key={`${selectedKey}-${k}`}
+                            ref={stampKind === k ? imgRef : undefined}
+                            src={imageUrlFor(selected, k)}
+                            alt={k}
+                            onLoad={stampKind === k ? onImgLoad : undefined}
+                          />
+                          {stampKind === k && showOverlay && anomalies && (
+                            <svg
+                              className="overlay"
+                              viewBox={`0 0 ${anomalies.image_width} ${anomalies.image_height}`}
+                              preserveAspectRatio="none"
+                              style={{ width: imgSize.w, height: imgSize.h }}
+                            >
+                              {anomalies.sources.map((s, i) => (
+                                <circle
+                                  key={i}
+                                  cx={s.x}
+                                  cy={s.y}
+                                  r={Math.max(6, 10 - i * 0.2)}
+                                  fill="none"
+                                  stroke={i < 3 ? '#ff4d6d' : '#ffd166'}
+                                  strokeWidth={1.5 / Math.min(scaleX, scaleY)}
+                                />
+                              ))}
+                            </svg>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="muted">
+                    Click a panel to select it — anomaly detection runs on the selected cutout.
+                    The <strong>difference</strong> image is where new sources stand out.
+                  </p>
+                </>
+              ) : selected.kind === 'apod' && selected.apod.media_type !== 'image' ? (
                 <div className="placeholder">
                   <p>This APOD entry is a video — no image to analyze.</p>
                 </div>
@@ -252,8 +391,8 @@ function App() {
                   <img
                     key={selectedKey ?? 'none'}
                     ref={imgRef}
-                    src={selectedImageUrl(selected)}
-                    alt={selectedTitle(selected)}
+                    src={imageUrlFor(selected)}
+                    alt={title}
                     onLoad={onImgLoad}
                   />
                   {showOverlay && anomalies && (
@@ -300,7 +439,11 @@ function App() {
                       selected.apod.media_type !== 'image')
                   }
                 >
-                  {loading ? 'Detecting…' : '🔍 Detect Anomalies'}
+                  {loading
+                    ? 'Detecting…'
+                    : selected.kind === 'transient'
+                      ? `🔍 Detect on ${stampKind}`
+                      : '🔍 Detect Anomalies'}
                 </button>
                 {anomalies && (
                   <label className="toggle">
@@ -323,7 +466,7 @@ function App() {
 
               {anomalies && anomalies.sources.length > 0 && (
                 <div className="anomaly-list">
-                  <h3>Top anomalies (brightness + sharpness score)</h3>
+                  <h3>Top sources (brightness + sharpness score)</h3>
                   <table>
                     <thead>
                       <tr>
@@ -351,11 +494,37 @@ function App() {
                 </div>
               )}
 
-              {selectedTopics(selected).length > 0 && (
+              {selected.kind === 'transient' && (
                 <div className="learn">
                   <h3>Learn more</h3>
                   <ul>
-                    {selectedTopics(selected).map((topic) => (
+                    <li>
+                      <a
+                        href={`https://alerce.online/object/${selected.transient.oid}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Full ALeRCE record →
+                      </a>
+                    </li>
+                    <li>
+                      <a
+                        href={`https://en.wikipedia.org/wiki/${encodeURIComponent(selected.transient.class)}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        About {selected.transient.class} →
+                      </a>
+                    </li>
+                  </ul>
+                </div>
+              )}
+
+              {topics.length > 0 && (
+                <div className="learn">
+                  <h3>Learn more</h3>
+                  <ul>
+                    {topics.map((topic) => (
                       <li key={topic}>
                         <a
                           href={`https://en.wikipedia.org/wiki/${encodeURIComponent(topic)}`}

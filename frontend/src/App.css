@@ -138,6 +138,80 @@ header h1 {
   overflow: hidden;
 }
 
+/* Transient cards in the sidebar */
+.tr-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.tr-meta {
+  font-size: 0.8rem;
+  font-family: ui-monospace, monospace;
+}
+
+/* Three-panel cutout grid for transients */
+.stamp-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.stamp {
+  background: #000;
+  border: 2px solid rgba(123, 157, 255, 0.2);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.1s;
+}
+
+.stamp:hover {
+  transform: translateY(-2px);
+}
+
+.stamp.selected {
+  border-color: #ff4d6d;
+  box-shadow: 0 0 0 2px rgba(255, 77, 109, 0.3);
+}
+
+.stamp-label {
+  background: rgba(12, 16, 40, 0.9);
+  color: #a7aef0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: 6px 10px;
+  text-align: center;
+}
+
+.stamp-img-wrap {
+  position: relative;
+}
+
+.stamp-img-wrap img {
+  width: 100%;
+  display: block;
+  image-rendering: pixelated;  /* keep the pixels sharp — these are 63x63 tiny cutouts */
+}
+
+/* Classification badges */
+.tag[class*="class-SN"] {
+  background: rgba(255, 77, 109, 0.2);
+  color: #ff8aa5;
+}
+.tag[class*="class-AGN"],
+.tag[class*="class-QSO"] {
+  background: rgba(255, 209, 102, 0.15);
+  color: #ffd166;
+}
+.tag[class*="class-YSO"] {
+  background: rgba(123, 157, 255, 0.2);
+  color: #9db3ff;
+}
+
 .gallery {
   background: rgba(20, 24, 60, 0.4);
   border: 1px solid rgba(123, 157, 255, 0.15);

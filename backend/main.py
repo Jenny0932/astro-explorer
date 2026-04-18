@@ -1,4 +1,5 @@
 """Astro Explorer backend — JWST press-release gallery + APOD feed + CV anomaly detection."""
+
 from __future__ import annotations
 
 import io
@@ -139,7 +140,9 @@ def get_target_image(target_id: str) -> Response:
     return Response(content=content, media_type=content_type)
 
 
-def _detect_sources(gray: np.ndarray, fwhm: float, nsigma: float) -> list[dict[str, Any]]:
+def _detect_sources(
+    gray: np.ndarray, fwhm: float, nsigma: float
+) -> list[dict[str, Any]]:
     """DAOStarFinder on a sigma-clipped background; score by brightness + sharpness."""
     _, median, std = sigma_clipped_stats(gray, sigma=3.0)
     finder = DAOStarFinder(fwhm=fwhm, threshold=nsigma * std)
@@ -202,7 +205,11 @@ _APOD_CACHE: dict[str, Any] = {"ts": 0.0, "days": 0, "data": []}
 
 def _fetch_apod_range(days: int) -> list[dict[str, Any]]:
     now = time.time()
-    if _APOD_CACHE["data"] and _APOD_CACHE["days"] == days and now - _APOD_CACHE["ts"] < 3600:
+    if (
+        _APOD_CACHE["data"]
+        and _APOD_CACHE["days"] == days
+        and now - _APOD_CACHE["ts"] < 3600
+    ):
         return _APOD_CACHE["data"]
 
     end = date.today()
@@ -220,7 +227,9 @@ def _fetch_apod_range(days: int) -> list[dict[str, Any]]:
         )
         r.raise_for_status()
     except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"NASA APOD fetch failed: {e}") from e
+        raise HTTPException(
+            status_code=502, detail=f"NASA APOD fetch failed: {e}"
+        ) from e
 
     entries = r.json()
     # Normalize: only keep what the frontend needs, newest first.
@@ -298,9 +307,7 @@ _TRANSIENT_LIST_CACHE: dict[str, Any] = {"ts": 0.0, "key": None, "data": []}
 _TRANSIENT_CANDID_CACHE: dict[str, str] = {}  # oid -> latest candid with a stamp
 
 
-def _fetch_transient_list(
-    limit: int, class_filter: str | None
-) -> list[dict[str, Any]]:
+def _fetch_transient_list(limit: int, class_filter: str | None) -> list[dict[str, Any]]:
     """Recently first-detected ZTF objects, sorted client-side by last detection."""
     now = time.time()
     key = f"{limit}:{class_filter or ''}"
@@ -354,7 +361,9 @@ def _latest_stamped_candid(oid: str) -> str:
         r = requests.get(f"{ALERCE_API}/objects/{oid}/lightcurve", timeout=30)
         r.raise_for_status()
     except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"ALeRCE lightcurve failed: {e}") from e
+        raise HTTPException(
+            status_code=502, detail=f"ALeRCE lightcurve failed: {e}"
+        ) from e
 
     dets = [d for d in r.json().get("detections", []) if d.get("has_stamp")]
     if not dets:
@@ -381,7 +390,9 @@ def get_transient_candid(oid: str) -> dict[str, str]:
 @app.get("/api/transients/{oid}/stamp/{kind}")
 def get_transient_stamp(oid: str, kind: str) -> Response:
     if kind not in ("science", "template", "difference"):
-        raise HTTPException(status_code=400, detail="kind must be science|template|difference")
+        raise HTTPException(
+            status_code=400, detail="kind must be science|template|difference"
+        )
     candid = _latest_stamped_candid(oid)
     url = f"{ALERCE_STAMPS}?oid={oid}&candid={candid}&type={kind}&format=png"
     try:
@@ -399,7 +410,9 @@ def detect_transient_anomalies(
     nsigma: float = Query(3.0, ge=1.0, le=20.0),
 ) -> JSONResponse:
     if kind not in ("science", "template", "difference"):
-        raise HTTPException(status_code=400, detail="kind must be science|template|difference")
+        raise HTTPException(
+            status_code=400, detail="kind must be science|template|difference"
+        )
     candid = _latest_stamped_candid(oid)
     url = f"{ALERCE_STAMPS}?oid={oid}&candid={candid}&type={kind}&format=png"
     result = _run_detection_on_url(url, fwhm, nsigma)
