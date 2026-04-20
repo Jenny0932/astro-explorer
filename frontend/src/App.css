@@ -377,6 +377,62 @@ button:disabled {
   color: white;
 }
 
+button.secondary {
+  background: #252a4d;
+  color: #c0c4e8;
+}
+
+button.secondary:hover:not(:disabled) {
+  background: #2e3460;
+}
+
+.link-btn {
+  background: transparent;
+  border: 1px solid #2e3356;
+  color: #c0c4e8;
+  padding: 4px 8px;
+  font-size: 0.85rem;
+  border-radius: 6px;
+}
+
+.link-btn:hover:not(:disabled) {
+  transform: none;
+  background: #2e3356;
+}
+
+.link-btn:disabled {
+  opacity: 0.4;
+}
+
+.explain-panel {
+  margin-top: 20px;
+  padding: 16px 20px;
+  background: linear-gradient(135deg, rgba(107, 141, 255, 0.08), rgba(164, 122, 255, 0.08));
+  border: 1px solid #2e3356;
+  border-radius: 10px;
+}
+
+.explain-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.explain-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.explain-text {
+  margin: 0;
+  color: #e0e3ff;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 .muted {
   color: #8b90b8;
   font-size: 0.9rem;
