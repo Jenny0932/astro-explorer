@@ -64,6 +64,13 @@ type PatchDetection = {
 
 type Detection = SourceDetection | BlobDetection | PatchDetection
 
+type ExplainResponse = {
+  explanation: string
+  model: string
+  crop_size: [number, number]
+  tokens: { input: number | null; output: number | null }
+}
+
 type AnomalyResponse = {
   image_width: number
   image_height: number
@@ -151,12 +158,43 @@ function renderDetection(d: Detection, i: number, opts: OverlayOpts) {
   )
 }
 
+function ExplainCell({
+  d,
+  i,
+  onExplain,
+  explainingLabel,
+}: {
+  d: Detection
+  i: number
+  onExplain: (d: Detection, label: string) => void
+  explainingLabel: string | null
+}) {
+  const label = `#${i + 1} (${d.type})`
+  const busy = explainingLabel === label
+  return (
+    <td>
+      <button
+        className="link-btn"
+        onClick={() => onExplain(d, label)}
+        disabled={busy || i >= 3}
+        title={i < 3 ? 'Ask the vision model' : 'Only top-3 detections are explainable'}
+      >
+        {busy ? '…' : '🤖'}
+      </button>
+    </td>
+  )
+}
+
 function DetectionTable({
   detections,
   method,
+  onExplain,
+  explainingLabel,
 }: {
   detections: Detection[]
   method: DetectionMethod
+  onExplain: (d: Detection, label: string) => void
+  explainingLabel: string | null
 }) {
   const rows = detections.slice(0, 10)
   if (method === 'sources') {
@@ -165,7 +203,7 @@ function DetectionTable({
         <h3>Top sources (brightness + sharpness score)</h3>
         <table>
           <thead>
-            <tr><th>#</th><th>x, y</th><th>Flux</th><th>Sharpness</th><th>Score</th></tr>
+            <tr><th>#</th><th>x, y</th><th>Flux</th><th>Sharpness</th><th>Score</th><th></th></tr>
           </thead>
           <tbody>
             {rows.map((d, i) => {
@@ -177,6 +215,7 @@ function DetectionTable({
                   <td>{s.flux.toFixed(1)}</td>
                   <td>{s.sharpness.toFixed(2)}</td>
                   <td>{s.score.toFixed(2)}</td>
+                  <ExplainCell d={s} i={i} onExplain={onExplain} explainingLabel={explainingLabel} />
                 </tr>
               )
             })}
@@ -191,7 +230,7 @@ function DetectionTable({
         <h3>Top blobs (LoG multi-scale)</h3>
         <table>
           <thead>
-            <tr><th>#</th><th>x, y</th><th>Radius</th><th>σ</th><th>Score</th></tr>
+            <tr><th>#</th><th>x, y</th><th>Radius</th><th>σ</th><th>Score</th><th></th></tr>
           </thead>
           <tbody>
             {rows.map((d, i) => {
@@ -203,6 +242,7 @@ function DetectionTable({
                   <td>{b.radius.toFixed(1)}</td>
                   <td>{b.sigma.toFixed(2)}</td>
                   <td>{b.score.toFixed(2)}</td>
+                  <ExplainCell d={b} i={i} onExplain={onExplain} explainingLabel={explainingLabel} />
                 </tr>
               )
             })}
@@ -216,7 +256,7 @@ function DetectionTable({
       <h3>Top anomalous patches (|mean z| ∨ |std z|)</h3>
       <table>
         <thead>
-          <tr><th>#</th><th>x, y</th><th>Size</th><th>mean z</th><th>std z</th><th>Score</th></tr>
+          <tr><th>#</th><th>x, y</th><th>Size</th><th>mean z</th><th>std z</th><th>Score</th><th></th></tr>
         </thead>
         <tbody>
           {rows.map((d, i) => {
@@ -229,6 +269,7 @@ function DetectionTable({
                 <td>{p.mean_z.toFixed(2)}</td>
                 <td>{p.std_z.toFixed(2)}</td>
                 <td>{p.score.toFixed(2)}</td>
+                <ExplainCell d={p} i={i} onExplain={onExplain} explainingLabel={explainingLabel} />
               </tr>
             )
           })}
@@ -259,6 +300,9 @@ function App() {
   const [anomalies, setAnomalies] = useState<AnomalyResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [explain, setExplain] = useState<ExplainResponse | null>(null)
+  const [explainFor, setExplainFor] = useState<string | null>(null) // label of the target being explained
+  const [explaining, setExplaining] = useState(false)
   const [showOverlay, setShowOverlay] = useState(true)
   const imgRef = useRef<HTMLImageElement>(null)
   const [imgSize, setImgSize] = useState({ w: 0, h: 0 })
@@ -292,8 +336,41 @@ function App() {
     setSelected(s)
     setAnomalies(null)
     setError(null)
+    setExplain(null)
+    setExplainFor(null)
     setImgSize({ w: 0, h: 0 })
     if (s.kind === 'transient') setStampKind('difference')
+  }
+
+  const explainUrlFor = (s: Selected, k: StampKind = stampKind): string => {
+    if (s.kind === 'target') return `/api/targets/${s.target.id}/explain`
+    if (s.kind === 'apod') return `/api/apod/${s.apod.date}/explain`
+    return `/api/transients/${s.transient.oid}/explain?kind=${k}`
+  }
+
+  const runExplain = async (detection: Detection | null, label: string) => {
+    if (!selected) return
+    setExplaining(true)
+    setExplain(null)
+    setExplainFor(label)
+    setError(null)
+    try {
+      const r = await fetch(explainUrlFor(selected), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ detection }),
+      })
+      if (!r.ok) {
+        const msg = await r.text().catch(() => '')
+        throw new Error(`HTTP ${r.status}: ${msg.slice(0, 200)}`)
+      }
+      setExplain((await r.json()) as ExplainResponse)
+    } catch (e) {
+      setError(`Explain failed: ${e}`)
+      setExplainFor(null)
+    } finally {
+      setExplaining(false)
+    }
   }
 
   const imageUrlFor = (s: Selected, k: StampKind = stampKind): string => {
@@ -645,12 +722,53 @@ function App() {
                     {anomalies.detections.length} {anomalies.method} found
                   </span>
                 )}
+                <button
+                  onClick={() => runExplain(null, 'whole image')}
+                  disabled={
+                    explaining ||
+                    (selected.kind === 'apod' &&
+                      selected.apod.media_type !== 'image')
+                  }
+                  className="secondary"
+                  title="Ask the vision model to describe the whole image"
+                >
+                  {explaining && explainFor === 'whole image'
+                    ? '🤖 Explaining…'
+                    : '🤖 Explain image'}
+                </button>
               </div>
 
               {error && <p className="error">{error}</p>}
 
               {anomalies && anomalies.detections.length > 0 && (
-                <DetectionTable detections={anomalies.detections} method={anomalies.method} />
+                <DetectionTable
+                  detections={anomalies.detections}
+                  method={anomalies.method}
+                  onExplain={(d, label) => runExplain(d, label)}
+                  explainingLabel={explaining ? explainFor : null}
+                />
+              )}
+
+              {(explain || (explaining && explainFor)) && (
+                <div className="explain-panel">
+                  <div className="explain-header">
+                    <h3>🤖 Vision model: {explainFor}</h3>
+                    {explain && (
+                      <span className="muted">
+                        {explain.model} · crop {explain.crop_size[0]}×{explain.crop_size[1]}
+                        {explain.tokens.input != null && (
+                          <> · {explain.tokens.input}→{explain.tokens.output} tok</>
+                        )}
+                      </span>
+                    )}
+                  </div>
+                  {explaining && !explain && (
+                    <p className="muted">Asking the vision model…</p>
+                  )}
+                  {explain && (
+                    <p className="explain-text">{explain.explanation}</p>
+                  )}
+                </div>
               )}
 
               {selected.kind === 'transient' && (

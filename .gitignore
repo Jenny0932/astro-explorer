@@ -1,0 +1,4 @@
+# Local environment (contains secrets — never commit)
+.env
+.env.local
+.env.*.local

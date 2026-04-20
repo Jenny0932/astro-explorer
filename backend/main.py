@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import os
 import time
@@ -16,11 +17,28 @@ from astropy.time import Time
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from openai import OpenAI, OpenAIError
 from photutils.detection import DAOStarFinder
 from PIL import Image
+from pydantic import BaseModel
 from skimage.feature import blob_log
 
 NASA_API_KEY = os.environ.get("NASA_API_KEY", "DEMO_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
+_OPENAI_CLIENT: OpenAI | None = None
+
+
+def _openai() -> OpenAI:
+    global _OPENAI_CLIENT
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY is not set. Export it in the backend environment to enable /explain.",
+        )
+    if _OPENAI_CLIENT is None:
+        _OPENAI_CLIENT = OpenAI()
+    return _OPENAI_CLIENT
+
 
 app = FastAPI(title="Astro Explorer API")
 
@@ -358,6 +376,134 @@ def _run_detection_on_url(
     )
 
 
+# -- Vision explanation (OpenAI) -----------------------------------------------
+
+VISION_SYSTEM_PROMPT = (
+    "You are an astronomy image analyst reviewing a grayscale crop from a "
+    "telescope image (JWST press-release, NASA APOD, or a ZTF transient stamp). "
+    "A classical computer-vision detector flagged a region as unusual. Your job: "
+    "in 3-5 short sentences, describe (1) what you visually see in the crop "
+    "(point source, extended blob, diffraction spike, edge artifact, noise, etc.), "
+    "(2) the most likely astronomical or instrumental interpretation, and "
+    "(3) how confident you are and why. Avoid speculation beyond what is visible. "
+    "Do not invent coordinates or magnitudes. Be concise and specific."
+)
+
+
+def _crop_for_explanation(
+    pil_img: Image.Image, detection: dict[str, Any] | None, pad: int = 48
+) -> Image.Image:
+    """Return a crop centered on the detection (with padding), or a resized full image."""
+    max_side = 512
+    if detection is None:
+        img = pil_img.copy()
+    elif detection.get("type") == "patch":
+        x = int(detection.get("x", 0))
+        y = int(detection.get("y", 0))
+        w = int(detection.get("w", 48))
+        h = int(detection.get("h", 48))
+        img = pil_img.crop(
+            (
+                max(0, x - pad),
+                max(0, y - pad),
+                min(pil_img.width, x + w + pad),
+                min(pil_img.height, y + h + pad),
+            )
+        )
+    else:
+        cx = int(detection.get("x", pil_img.width // 2))
+        cy = int(detection.get("y", pil_img.height // 2))
+        r = int(detection.get("radius", 16))
+        half = max(64, r * 4)
+        img = pil_img.crop(
+            (
+                max(0, cx - half),
+                max(0, cy - half),
+                min(pil_img.width, cx + half),
+                min(pil_img.height, cy + half),
+            )
+        )
+    if max(img.size) > max_side:
+        img.thumbnail((max_side, max_side))
+    return img
+
+
+def _explain_image(
+    pil_img: Image.Image,
+    detection: dict[str, Any] | None,
+    context: str,
+) -> dict[str, Any]:
+    """Send crop + context to OpenAI vision and return the explanation."""
+    crop = _crop_for_explanation(pil_img, detection)
+    buf = io.BytesIO()
+    crop.convert("RGB").save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    det_line = ""
+    if detection is not None:
+        det_line = f"\nDetector flagged a {detection.get('type', 'region')} at image coords ({detection.get('x')}, {detection.get('y')})"
+        if "score" in detection:
+            det_line += f" with score {detection['score']:.2f}"
+        det_line += "."
+
+    user_text = (
+        f"Context: {context}{det_line}\n"
+        "Please describe what you see in this crop and what it likely is."
+    )
+
+    try:
+        resp = _openai().chat.completions.create(
+            model=OPENAI_MODEL,
+            max_tokens=350,
+            messages=[
+                {"role": "system", "content": VISION_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{b64}"},
+                        },
+                    ],
+                },
+            ],
+        )
+    except OpenAIError as e:
+        raise HTTPException(
+            status_code=502, detail=f"OpenAI vision call failed: {e}"
+        ) from e
+
+    usage = resp.usage
+    return {
+        "model": OPENAI_MODEL,
+        "explanation": (resp.choices[0].message.content or "").strip(),
+        "crop_size": list(crop.size),
+        "tokens": {
+            "input": usage.prompt_tokens if usage else None,
+            "output": usage.completion_tokens if usage else None,
+        },
+    }
+
+
+class ExplainRequest(BaseModel):
+    detection: dict[str, Any] | None = None
+    context: str | None = None
+
+
+def _pil_from_gray(gray: np.ndarray) -> Image.Image:
+    arr = np.clip(gray, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr, mode="L")
+
+
+def _pil_from_url(url: str) -> Image.Image:
+    try:
+        content, _ = _download_image(url)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Image fetch failed: {e}") from e
+    return Image.open(io.BytesIO(content)).convert("L")
+
+
 @app.get("/api/targets/{target_id}/anomalies")
 def detect_anomalies(
     target_id: str,
@@ -383,6 +529,16 @@ def detect_anomalies(
         top_n,
     )
     return JSONResponse({"target_id": target_id, **result})
+
+
+@app.post("/api/targets/{target_id}/explain")
+def explain_target(target_id: str, req: ExplainRequest) -> dict[str, Any]:
+    t = _find_target(target_id)
+    pil = _pil_from_url(t["image_url"])
+    context = f"JWST target: {t['name']}. {t['blurb']}"
+    if req.context:
+        context += f" Additional note: {req.context}"
+    return _explain_image(pil, req.detection, context)
 
 
 # -- APOD (Astronomy Picture of the Day) ---------------------------------------
@@ -496,6 +652,22 @@ def detect_apod_anomalies(
         top_n,
     )
     return JSONResponse({"date": apod_date, **result})
+
+
+@app.post("/api/apod/{apod_date}/explain")
+def explain_apod(apod_date: str, req: ExplainRequest) -> dict[str, Any]:
+    entries = _fetch_apod_range(30)
+    e = _find_apod(entries, apod_date)
+    if e["media_type"] != "image":
+        raise HTTPException(status_code=415, detail="APOD entry is not an image")
+    pil = _pil_from_url(e["image_url"])
+    context = (
+        f"NASA Astronomy Picture of the Day, {e.get('date')}: "
+        f"{e.get('title')}. {e.get('explanation', '')}"
+    )
+    if req.context:
+        context += f" Additional note: {req.context}"
+    return _explain_image(pil, req.detection, context)
 
 
 # -- ZTF transients via ALeRCE broker ------------------------------------------
@@ -665,6 +837,39 @@ def detect_transient_anomalies(
             **result,
         }
     )
+
+
+@app.post("/api/transients/{oid}/explain")
+def explain_transient(
+    oid: str,
+    req: ExplainRequest,
+    kind: str = Query("difference"),
+) -> dict[str, Any]:
+    if kind not in ("science", "template", "difference"):
+        raise HTTPException(
+            status_code=400, detail="kind must be science|template|difference"
+        )
+    candid = _latest_stamped_candid(oid)
+    if kind == "difference":
+        sci_url = f"{ALERCE_STAMPS}?oid={oid}&candid={candid}&type=science&format=png"
+        tmp_url = f"{ALERCE_STAMPS}?oid={oid}&candid={candid}&type=template&format=png"
+        gray = _normalized_residual(_fetch_gray(sci_url), _fetch_gray(tmp_url))
+        pil = _pil_from_gray(gray)
+        input_note = (
+            "normalized residual (science z-score − template z-score, "
+            "remapped so 128 = zero, brighter = new source)"
+        )
+    else:
+        url = f"{ALERCE_STAMPS}?oid={oid}&candid={candid}&type={kind}&format=png"
+        pil = _pil_from_url(url)
+        input_note = f"ALeRCE {kind} stamp"
+    context = (
+        f"ZTF transient {oid}, {kind} cutout ({input_note}). "
+        "These are ~60x60 arcsec cutouts around a variable/transient source."
+    )
+    if req.context:
+        context += f" Additional note: {req.context}"
+    return _explain_image(pil, req.detection, context)
 
 
 @app.get("/api/health")
