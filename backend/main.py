@@ -267,21 +267,27 @@ def _zscore(gray: np.ndarray) -> np.ndarray:
 
 
 def _normalized_residual(science: np.ndarray, template: np.ndarray) -> np.ndarray:
-    """z-score science and template separately, subtract, remap |residual| to 0-255.
+    """z-score science and template separately, subtract, remap signed residual to 0-255.
 
-    This bypasses ALeRCE's display-stretched difference PNG. Each image's sky
-    background is brought to the same baseline before subtraction, so the
-    residual is dominated by what actually changed rather than global scaling.
-    We map |residual| to 0-255 so the downstream detectors keep their "bright
-    = anomalous" assumption; polarity info (new vs disappeared source) is
-    dropped in favor of catching both.
+    Each image's sky background is brought to mean 0, std 1 before
+    subtraction, so the residual is dominated by what actually changed
+    rather than global scaling. Polarity is preserved:
+
+      positive residual (new source)   -> pixel > 128 (bright)
+      zero residual (unchanged sky)    -> pixel ~ 128
+      negative residual (disappeared)  -> pixel < 128 (dark)
+
+    Downstream bright-peak detectors (DAO, blob_log) then find only new
+    appearances, which is the more diagnostic signal for transients.
+    Clip range is set by the 99th percentile of |residual| to stay robust
+    to a few saturated pixels.
     """
     h = min(science.shape[0], template.shape[0])
     w = min(science.shape[1], template.shape[1])
     residual = _zscore(science[:h, :w]) - _zscore(template[:h, :w])
-    abs_res = np.abs(residual)
-    p99 = float(np.percentile(abs_res, 99))
-    return np.clip(abs_res / (p99 + 1e-6), 0.0, 1.0).astype(np.float32) * 255.0
+    p99 = float(np.percentile(np.abs(residual), 99))
+    scaled = np.clip(residual, -p99, p99) / (p99 + 1e-6) * 127.0 + 128.0
+    return scaled.astype(np.float32)
 
 
 def _run_detection_on_gray(
