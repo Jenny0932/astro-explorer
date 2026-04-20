@@ -6,6 +6,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND="$ROOT/backend"
 FRONTEND="$ROOT/frontend"
 
+# Auto-load .env (gitignored; see .env.example).
+if [ -f "$ROOT/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
 command -v uv >/dev/null || { echo "error: 'uv' not found. Install: https://docs.astral.sh/uv/"; exit 1; }
 command -v npm >/dev/null || { echo "error: 'npm' not found. Install Node.js: https://nodejs.org/"; exit 1; }
 
