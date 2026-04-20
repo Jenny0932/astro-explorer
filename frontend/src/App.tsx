@@ -30,7 +30,10 @@ type Transient = {
 
 type StampKind = 'science' | 'template' | 'difference'
 
-type Source = {
+type DetectionMethod = 'sources' | 'blobs' | 'patches'
+
+type SourceDetection = {
+  type: 'source'
   x: number
   y: number
   flux: number
@@ -39,13 +42,42 @@ type Source = {
   score: number
 }
 
+type BlobDetection = {
+  type: 'blob'
+  x: number
+  y: number
+  radius: number
+  sigma: number
+  score: number
+}
+
+type PatchDetection = {
+  type: 'patch'
+  x: number
+  y: number
+  w: number
+  h: number
+  mean_z: number
+  std_z: number
+  score: number
+}
+
+type Detection = SourceDetection | BlobDetection | PatchDetection
+
 type AnomalyResponse = {
   image_width: number
   image_height: number
-  params: { fwhm: number; nsigma: number }
-  sources: Source[]
+  method: DetectionMethod
+  params: Record<string, number>
+  detections: Detection[]
   kind?: StampKind
 }
+
+const METHODS: { id: DetectionMethod; label: string; hint: string }[] = [
+  { id: 'sources', label: 'Sources (DAO)', hint: 'Point-like stars via DAOStarFinder' },
+  { id: 'blobs', label: 'Blobs (LoG)', hint: 'Multi-scale Laplacian-of-Gaussian — extended objects' },
+  { id: 'patches', label: 'Patches', hint: 'Tile + z-score — unusual regions' },
+]
 
 type Selected =
   | { kind: 'target'; target: Target }
@@ -55,6 +87,156 @@ type Selected =
 type Tab = 'featured' | 'daily' | 'transients'
 
 const STAMP_KINDS: StampKind[] = ['science', 'template', 'difference']
+
+type OverlayOpts = {
+  strokeWidth: number
+  fontSize: number
+  topN: number
+  defaultRadius: number
+}
+
+function renderDetection(d: Detection, i: number, opts: OverlayOpts) {
+  const highlight = i < opts.topN
+  const stroke = highlight ? '#ff4d6d' : '#ffd166'
+  const showLabel = highlight && opts.fontSize > 0
+  if (d.type === 'patch') {
+    return (
+      <g key={i}>
+        <rect
+          x={d.x}
+          y={d.y}
+          width={d.w}
+          height={d.h}
+          fill="none"
+          stroke={stroke}
+          strokeWidth={opts.strokeWidth}
+        />
+        {showLabel && (
+          <text
+            x={d.x + 4}
+            y={d.y + opts.fontSize}
+            fill={stroke}
+            fontSize={opts.fontSize}
+            fontWeight="bold"
+          >
+            #{i + 1}
+          </text>
+        )}
+      </g>
+    )
+  }
+  const r = d.type === 'blob' ? d.radius : opts.defaultRadius
+  return (
+    <g key={i}>
+      <circle
+        cx={d.x}
+        cy={d.y}
+        r={r}
+        fill="none"
+        stroke={stroke}
+        strokeWidth={opts.strokeWidth}
+      />
+      {showLabel && (
+        <text
+          x={d.x + r + 4}
+          y={d.y - r + opts.fontSize * 0.3}
+          fill={stroke}
+          fontSize={opts.fontSize}
+          fontWeight="bold"
+        >
+          #{i + 1}
+        </text>
+      )}
+    </g>
+  )
+}
+
+function DetectionTable({
+  detections,
+  method,
+}: {
+  detections: Detection[]
+  method: DetectionMethod
+}) {
+  const rows = detections.slice(0, 10)
+  if (method === 'sources') {
+    return (
+      <div className="anomaly-list">
+        <h3>Top sources (brightness + sharpness score)</h3>
+        <table>
+          <thead>
+            <tr><th>#</th><th>x, y</th><th>Flux</th><th>Sharpness</th><th>Score</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((d, i) => {
+              const s = d as SourceDetection
+              return (
+                <tr key={i}>
+                  <td>{i + 1}</td>
+                  <td>({s.x.toFixed(0)}, {s.y.toFixed(0)})</td>
+                  <td>{s.flux.toFixed(1)}</td>
+                  <td>{s.sharpness.toFixed(2)}</td>
+                  <td>{s.score.toFixed(2)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+  if (method === 'blobs') {
+    return (
+      <div className="anomaly-list">
+        <h3>Top blobs (LoG multi-scale)</h3>
+        <table>
+          <thead>
+            <tr><th>#</th><th>x, y</th><th>Radius</th><th>σ</th><th>Score</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((d, i) => {
+              const b = d as BlobDetection
+              return (
+                <tr key={i}>
+                  <td>{i + 1}</td>
+                  <td>({b.x.toFixed(0)}, {b.y.toFixed(0)})</td>
+                  <td>{b.radius.toFixed(1)}</td>
+                  <td>{b.sigma.toFixed(2)}</td>
+                  <td>{b.score.toFixed(2)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+  return (
+    <div className="anomaly-list">
+      <h3>Top anomalous patches (|mean z| ∨ |std z|)</h3>
+      <table>
+        <thead>
+          <tr><th>#</th><th>x, y</th><th>Size</th><th>mean z</th><th>std z</th><th>Score</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((d, i) => {
+            const p = d as PatchDetection
+            return (
+              <tr key={i}>
+                <td>{i + 1}</td>
+                <td>({p.x.toFixed(0)}, {p.y.toFixed(0)})</td>
+                <td>{p.w.toFixed(0)}×{p.h.toFixed(0)}</td>
+                <td>{p.mean_z.toFixed(2)}</td>
+                <td>{p.std_z.toFixed(2)}</td>
+                <td>{p.score.toFixed(2)}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
 
 function mjdToDate(mjd: number): string {
   // MJD 0 = 1858-11-17 00:00 UTC
@@ -73,6 +255,7 @@ function App() {
   const transientsLoading = tab === 'transients' && !transientsFetched
   const [selected, setSelected] = useState<Selected | null>(null)
   const [stampKind, setStampKind] = useState<StampKind>('difference')
+  const [method, setMethod] = useState<DetectionMethod>('sources')
   const [anomalies, setAnomalies] = useState<AnomalyResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -120,9 +303,13 @@ function App() {
   }
 
   const anomaliesUrlFor = (s: Selected, k: StampKind = stampKind): string => {
-    if (s.kind === 'target') return `/api/targets/${s.target.id}/anomalies`
-    if (s.kind === 'apod') return `/api/apod/${s.apod.date}/anomalies`
-    return `/api/transients/${s.transient.oid}/anomalies?kind=${k}`
+    const base =
+      s.kind === 'target'
+        ? `/api/targets/${s.target.id}/anomalies`
+        : s.kind === 'apod'
+          ? `/api/apod/${s.apod.date}/anomalies`
+          : `/api/transients/${s.transient.oid}/anomalies?kind=${k}`
+    return `${base}${base.includes('?') ? '&' : '?'}method=${method}`
   }
 
   const runAnomalyDetection = async () => {
@@ -360,17 +547,14 @@ function App() {
                               preserveAspectRatio="none"
                               style={{ width: imgSize.w, height: imgSize.h }}
                             >
-                              {anomalies.sources.map((s, i) => (
-                                <circle
-                                  key={i}
-                                  cx={s.x}
-                                  cy={s.y}
-                                  r={Math.max(6, 10 - i * 0.2)}
-                                  fill="none"
-                                  stroke={i < 3 ? '#ff4d6d' : '#ffd166'}
-                                  strokeWidth={1.5 / Math.min(scaleX, scaleY)}
-                                />
-                              ))}
+                              {anomalies.detections.map((d, i) =>
+                                renderDetection(d, i, {
+                                  strokeWidth: 1.5 / Math.min(scaleX, scaleY),
+                                  fontSize: 0,
+                                  topN: 3,
+                                  defaultRadius: Math.max(6, 10 - i * 0.2),
+                                }),
+                              )}
                             </svg>
                           )}
                         </div>
@@ -402,35 +586,36 @@ function App() {
                       preserveAspectRatio="none"
                       style={{ width: imgSize.w, height: imgSize.h }}
                     >
-                      {anomalies.sources.map((s, i) => (
-                        <g key={i}>
-                          <circle
-                            cx={s.x}
-                            cy={s.y}
-                            r={Math.max(8, 14 - i * 0.1)}
-                            fill="none"
-                            stroke={i < 5 ? '#ff4d6d' : '#ffd166'}
-                            strokeWidth={2 / Math.min(scaleX, scaleY)}
-                          />
-                          {i < 5 && (
-                            <text
-                              x={s.x + 16}
-                              y={s.y - 10}
-                              fill="#ff4d6d"
-                              fontSize={20 / Math.min(scaleX, scaleY)}
-                              fontWeight="bold"
-                            >
-                              #{i + 1}
-                            </text>
-                          )}
-                        </g>
-                      ))}
+                      {anomalies.detections.map((d, i) =>
+                        renderDetection(d, i, {
+                          strokeWidth: 2 / Math.min(scaleX, scaleY),
+                          fontSize: 20 / Math.min(scaleX, scaleY),
+                          topN: 5,
+                          defaultRadius: Math.max(8, 14 - i * 0.1),
+                        }),
+                      )}
                     </svg>
                   )}
                 </div>
               )}
 
               <div className="controls">
+                <div className="method-picker" role="tablist">
+                  {METHODS.map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      className={`method-btn ${method === m.id ? 'active' : ''}`}
+                      title={m.hint}
+                      onClick={() => {
+                        setMethod(m.id)
+                        setAnomalies(null)
+                      }}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
                 <button
                   onClick={runAnomalyDetection}
                   disabled={
@@ -457,41 +642,15 @@ function App() {
                 )}
                 {anomalies && (
                   <span className="muted">
-                    {anomalies.sources.length} sources found
+                    {anomalies.detections.length} {anomalies.method} found
                   </span>
                 )}
               </div>
 
               {error && <p className="error">{error}</p>}
 
-              {anomalies && anomalies.sources.length > 0 && (
-                <div className="anomaly-list">
-                  <h3>Top sources (brightness + sharpness score)</h3>
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>#</th>
-                        <th>x, y</th>
-                        <th>Flux</th>
-                        <th>Sharpness</th>
-                        <th>Score</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {anomalies.sources.slice(0, 10).map((s, i) => (
-                        <tr key={i}>
-                          <td>{i + 1}</td>
-                          <td>
-                            ({s.x.toFixed(0)}, {s.y.toFixed(0)})
-                          </td>
-                          <td>{s.flux.toFixed(1)}</td>
-                          <td>{s.sharpness.toFixed(2)}</td>
-                          <td>{s.score.toFixed(2)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+              {anomalies && anomalies.detections.length > 0 && (
+                <DetectionTable detections={anomalies.detections} method={anomalies.method} />
               )}
 
               {selected.kind === 'transient' && (

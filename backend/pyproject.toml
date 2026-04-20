@@ -11,5 +11,6 @@ dependencies = [
     "pillow>=12.2.0",
     "python-multipart>=0.0.26",
     "requests>=2.33.1",
+    "scikit-image>=0.25.0",
     "uvicorn[standard]>=0.44.0",
 ]

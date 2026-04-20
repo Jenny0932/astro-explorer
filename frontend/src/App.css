@@ -345,6 +345,38 @@ button:disabled {
   cursor: pointer;
 }
 
+.method-picker {
+  display: inline-flex;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #2e3356;
+}
+
+.method-btn {
+  background: transparent;
+  color: #c0c4e8;
+  padding: 8px 14px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  border-radius: 0;
+  border: none;
+  border-right: 1px solid #2e3356;
+}
+
+.method-btn:last-child {
+  border-right: none;
+}
+
+.method-btn:hover:not(.active) {
+  background: #1a1e3a;
+  transform: none;
+}
+
+.method-btn.active {
+  background: linear-gradient(135deg, #6b8dff, #a47aff);
+  color: white;
+}
+
 .muted {
   color: #8b90b8;
   font-size: 0.9rem;
