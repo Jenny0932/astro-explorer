@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from photutils.detection import DAOStarFinder
 from PIL import Image
+from skimage.feature import blob_log
 
 NASA_API_KEY = os.environ.get("NASA_API_KEY", "DEMO_KEY")
 
@@ -140,6 +141,9 @@ def get_target_image(target_id: str) -> Response:
     return Response(content=content, media_type=content_type)
 
 
+SUPPORTED_METHODS = ("sources", "blobs", "patches")
+
+
 def _detect_sources(
     gray: np.ndarray, fwhm: float, nsigma: float
 ) -> list[dict[str, Any]]:
@@ -158,6 +162,7 @@ def _detect_sources(
 
     results = [
         {
+            "type": "source",
             "x": float(tbl["xcentroid"][i]),
             "y": float(tbl["ycentroid"][i]),
             "flux": float(tbl["flux"][i]),
@@ -171,29 +176,153 @@ def _detect_sources(
     return results[:50]
 
 
-def _run_detection_on_url(url: str, fwhm: float, nsigma: float) -> dict[str, Any]:
+def _detect_blobs(
+    gray: np.ndarray, min_sigma: float, max_sigma: float, threshold: float
+) -> list[dict[str, Any]]:
+    """Multi-scale Laplacian-of-Gaussian blobs; catches extended sources DAO misses."""
+    norm = gray / 255.0
+    blobs = blob_log(
+        norm,
+        min_sigma=min_sigma,
+        max_sigma=max_sigma,
+        num_sigma=10,
+        threshold=threshold,
+    )
+    if len(blobs) == 0:
+        return []
+
+    _, median, std = sigma_clipped_stats(gray, sigma=3.0)
+    h, w = gray.shape
+    results: list[dict[str, Any]] = []
+    for y, x, sigma in blobs:
+        yi, xi = int(round(y)), int(round(x))
+        yi = max(0, min(h - 1, yi))
+        xi = max(0, min(w - 1, xi))
+        # Local brightness above background, normalized by sky noise.
+        score = float((gray[yi, xi] - median) / (std + 1e-6))
+        results.append(
+            {
+                "type": "blob",
+                "x": float(x),
+                "y": float(y),
+                "radius": float(sigma * np.sqrt(2)),
+                "sigma": float(sigma),
+                "score": score,
+            }
+        )
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results[:50]
+
+
+def _detect_patches(
+    gray: np.ndarray, patch_size: int, top_n: int
+) -> list[dict[str, Any]]:
+    """Tile the image and z-score each patch by mean + stddev — flags unusual regions."""
+    h, w = gray.shape
+    ny, nx = max(1, h // patch_size), max(1, w // patch_size)
+    if ny == 0 or nx == 0:
+        return []
+
+    trimmed = gray[: ny * patch_size, : nx * patch_size]
+    tiles = trimmed.reshape(ny, patch_size, nx, patch_size).swapaxes(1, 2)
+    means = tiles.mean(axis=(2, 3))
+    stds = tiles.std(axis=(2, 3))
+
+    mean_z = (means - np.median(means)) / (np.std(means) + 1e-6)
+    std_z = (stds - np.median(stds)) / (np.std(stds) + 1e-6)
+    # A patch is "anomalous" if it's unusually bright *or* unusually textured.
+    score = np.maximum(np.abs(mean_z), np.abs(std_z))
+
+    flat = [
+        {
+            "type": "patch",
+            "x": float(j * patch_size),
+            "y": float(i * patch_size),
+            "w": float(patch_size),
+            "h": float(patch_size),
+            "mean_z": float(mean_z[i, j]),
+            "std_z": float(std_z[i, j]),
+            "score": float(score[i, j]),
+        }
+        for i in range(ny)
+        for j in range(nx)
+    ]
+    flat.sort(key=lambda r: r["score"], reverse=True)
+    return flat[:top_n]
+
+
+def _run_detection_on_url(
+    url: str,
+    method: str,
+    fwhm: float,
+    nsigma: float,
+    min_sigma: float,
+    max_sigma: float,
+    blob_threshold: float,
+    patch_size: int,
+    top_n: int,
+) -> dict[str, Any]:
+    if method not in SUPPORTED_METHODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"method must be one of {SUPPORTED_METHODS}",
+        )
     try:
         content, _ = _download_image(url)
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"Image fetch failed: {e}") from e
     img = Image.open(io.BytesIO(content)).convert("L")
     gray = np.asarray(img, dtype=np.float32)
+
+    if method == "sources":
+        detections = _detect_sources(gray, fwhm=fwhm, nsigma=nsigma)
+        params = {"fwhm": fwhm, "nsigma": nsigma}
+    elif method == "blobs":
+        detections = _detect_blobs(
+            gray, min_sigma=min_sigma, max_sigma=max_sigma, threshold=blob_threshold
+        )
+        params = {
+            "min_sigma": min_sigma,
+            "max_sigma": max_sigma,
+            "threshold": blob_threshold,
+        }
+    else:  # patches
+        detections = _detect_patches(gray, patch_size=patch_size, top_n=top_n)
+        params = {"patch_size": patch_size, "top_n": top_n}
+
     return {
         "image_width": img.width,
         "image_height": img.height,
-        "params": {"fwhm": fwhm, "nsigma": nsigma},
-        "sources": _detect_sources(gray, fwhm=fwhm, nsigma=nsigma),
+        "method": method,
+        "params": params,
+        "detections": detections,
     }
 
 
 @app.get("/api/targets/{target_id}/anomalies")
 def detect_anomalies(
     target_id: str,
+    method: str = Query("sources"),
     fwhm: float = Query(3.0, ge=1.0, le=20.0),
     nsigma: float = Query(5.0, ge=1.0, le=20.0),
+    min_sigma: float = Query(2.0, ge=0.5, le=20.0),
+    max_sigma: float = Query(15.0, ge=1.0, le=50.0),
+    blob_threshold: float = Query(0.05, ge=0.001, le=1.0),
+    patch_size: int = Query(48, ge=8, le=256),
+    top_n: int = Query(30, ge=1, le=200),
 ) -> JSONResponse:
     t = _find_target(target_id)
-    result = _run_detection_on_url(t["image_url"], fwhm, nsigma)
+    result = _run_detection_on_url(
+        t["image_url"],
+        method,
+        fwhm,
+        nsigma,
+        min_sigma,
+        max_sigma,
+        blob_threshold,
+        patch_size,
+        top_n,
+    )
     return JSONResponse({"target_id": target_id, **result})
 
 
@@ -283,14 +412,30 @@ def get_apod_image(apod_date: str) -> Response:
 @app.get("/api/apod/{apod_date}/anomalies")
 def detect_apod_anomalies(
     apod_date: str,
+    method: str = Query("sources"),
     fwhm: float = Query(3.0, ge=1.0, le=20.0),
     nsigma: float = Query(5.0, ge=1.0, le=20.0),
+    min_sigma: float = Query(2.0, ge=0.5, le=20.0),
+    max_sigma: float = Query(15.0, ge=1.0, le=50.0),
+    blob_threshold: float = Query(0.05, ge=0.001, le=1.0),
+    patch_size: int = Query(48, ge=8, le=256),
+    top_n: int = Query(30, ge=1, le=200),
 ) -> JSONResponse:
     entries = _fetch_apod_range(30)
     e = _find_apod(entries, apod_date)
     if e["media_type"] != "image":
         raise HTTPException(status_code=415, detail="APOD entry is not an image")
-    result = _run_detection_on_url(e["image_url"], fwhm, nsigma)
+    result = _run_detection_on_url(
+        e["image_url"],
+        method,
+        fwhm,
+        nsigma,
+        min_sigma,
+        max_sigma,
+        blob_threshold,
+        patch_size,
+        top_n,
+    )
     return JSONResponse({"date": apod_date, **result})
 
 
@@ -406,8 +551,14 @@ def get_transient_stamp(oid: str, kind: str) -> Response:
 def detect_transient_anomalies(
     oid: str,
     kind: str = Query("difference"),
+    method: str = Query("sources"),
     fwhm: float = Query(2.0, ge=1.0, le=20.0),
     nsigma: float = Query(3.0, ge=1.0, le=20.0),
+    min_sigma: float = Query(1.0, ge=0.5, le=20.0),
+    max_sigma: float = Query(8.0, ge=1.0, le=50.0),
+    blob_threshold: float = Query(0.05, ge=0.001, le=1.0),
+    patch_size: int = Query(16, ge=4, le=64),
+    top_n: int = Query(15, ge=1, le=100),
 ) -> JSONResponse:
     if kind not in ("science", "template", "difference"):
         raise HTTPException(
@@ -415,7 +566,17 @@ def detect_transient_anomalies(
         )
     candid = _latest_stamped_candid(oid)
     url = f"{ALERCE_STAMPS}?oid={oid}&candid={candid}&type={kind}&format=png"
-    result = _run_detection_on_url(url, fwhm, nsigma)
+    result = _run_detection_on_url(
+        url,
+        method,
+        fwhm,
+        nsigma,
+        min_sigma,
+        max_sigma,
+        blob_threshold,
+        patch_size,
+        top_n,
+    )
     return JSONResponse({"oid": oid, "kind": kind, "candid": candid, **result})
 
 
