@@ -251,8 +251,41 @@ def _detect_patches(
     return flat[:top_n]
 
 
-def _run_detection_on_url(
-    url: str,
+def _fetch_gray(url: str) -> np.ndarray:
+    try:
+        content, _ = _download_image(url)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Image fetch failed: {e}") from e
+    img = Image.open(io.BytesIO(content)).convert("L")
+    return np.asarray(img, dtype=np.float32)
+
+
+def _zscore(gray: np.ndarray) -> np.ndarray:
+    """Sigma-clipped robust z-score: sky background has mean 0, std 1."""
+    _, median, std = sigma_clipped_stats(gray, sigma=3.0)
+    return (gray - median) / (std + 1e-6)
+
+
+def _normalized_residual(science: np.ndarray, template: np.ndarray) -> np.ndarray:
+    """z-score science and template separately, subtract, remap |residual| to 0-255.
+
+    This bypasses ALeRCE's display-stretched difference PNG. Each image's sky
+    background is brought to the same baseline before subtraction, so the
+    residual is dominated by what actually changed rather than global scaling.
+    We map |residual| to 0-255 so the downstream detectors keep their "bright
+    = anomalous" assumption; polarity info (new vs disappeared source) is
+    dropped in favor of catching both.
+    """
+    h = min(science.shape[0], template.shape[0])
+    w = min(science.shape[1], template.shape[1])
+    residual = _zscore(science[:h, :w]) - _zscore(template[:h, :w])
+    abs_res = np.abs(residual)
+    p99 = float(np.percentile(abs_res, 99))
+    return np.clip(abs_res / (p99 + 1e-6), 0.0, 1.0).astype(np.float32) * 255.0
+
+
+def _run_detection_on_gray(
+    gray: np.ndarray,
     method: str,
     fwhm: float,
     nsigma: float,
@@ -267,12 +300,7 @@ def _run_detection_on_url(
             status_code=400,
             detail=f"method must be one of {SUPPORTED_METHODS}",
         )
-    try:
-        content, _ = _download_image(url)
-    except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"Image fetch failed: {e}") from e
-    img = Image.open(io.BytesIO(content)).convert("L")
-    gray = np.asarray(img, dtype=np.float32)
+    h, w = gray.shape
 
     if method == "sources":
         detections = _detect_sources(gray, fwhm=fwhm, nsigma=nsigma)
@@ -291,12 +319,37 @@ def _run_detection_on_url(
         params = {"patch_size": patch_size, "top_n": top_n}
 
     return {
-        "image_width": img.width,
-        "image_height": img.height,
+        "image_width": w,
+        "image_height": h,
         "method": method,
         "params": params,
         "detections": detections,
     }
+
+
+def _run_detection_on_url(
+    url: str,
+    method: str,
+    fwhm: float,
+    nsigma: float,
+    min_sigma: float,
+    max_sigma: float,
+    blob_threshold: float,
+    patch_size: int,
+    top_n: int,
+) -> dict[str, Any]:
+    gray = _fetch_gray(url)
+    return _run_detection_on_gray(
+        gray,
+        method,
+        fwhm,
+        nsigma,
+        min_sigma,
+        max_sigma,
+        blob_threshold,
+        patch_size,
+        top_n,
+    )
 
 
 @app.get("/api/targets/{target_id}/anomalies")
@@ -565,19 +618,47 @@ def detect_transient_anomalies(
             status_code=400, detail="kind must be science|template|difference"
         )
     candid = _latest_stamped_candid(oid)
-    url = f"{ALERCE_STAMPS}?oid={oid}&candid={candid}&type={kind}&format=png"
-    result = _run_detection_on_url(
-        url,
-        method,
-        fwhm,
-        nsigma,
-        min_sigma,
-        max_sigma,
-        blob_threshold,
-        patch_size,
-        top_n,
+    detection_input = kind
+    if kind == "difference":
+        # Bypass ALeRCE's display-stretched diff PNG: z-score science and
+        # template independently, subtract, and detect on |residual|.
+        sci_url = f"{ALERCE_STAMPS}?oid={oid}&candid={candid}&type=science&format=png"
+        tmp_url = f"{ALERCE_STAMPS}?oid={oid}&candid={candid}&type=template&format=png"
+        gray = _normalized_residual(_fetch_gray(sci_url), _fetch_gray(tmp_url))
+        result = _run_detection_on_gray(
+            gray,
+            method,
+            fwhm,
+            nsigma,
+            min_sigma,
+            max_sigma,
+            blob_threshold,
+            patch_size,
+            top_n,
+        )
+        detection_input = "normalized-residual"
+    else:
+        url = f"{ALERCE_STAMPS}?oid={oid}&candid={candid}&type={kind}&format=png"
+        result = _run_detection_on_url(
+            url,
+            method,
+            fwhm,
+            nsigma,
+            min_sigma,
+            max_sigma,
+            blob_threshold,
+            patch_size,
+            top_n,
+        )
+    return JSONResponse(
+        {
+            "oid": oid,
+            "kind": kind,
+            "candid": candid,
+            "detection_input": detection_input,
+            **result,
+        }
     )
-    return JSONResponse({"oid": oid, "kind": kind, "candid": candid, **result})
 
 
 @app.get("/api/health")
