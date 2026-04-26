@@ -285,6 +285,138 @@ function mjdToDate(mjd: number): string {
   return new Date(ms).toISOString().slice(0, 10)
 }
 
+type ChatMessage = { role: 'user' | 'assistant'; content: string }
+
+type ChatContext = {
+  entity: 'target' | 'apod' | 'transient'
+  id: string
+  kind?: StampKind
+}
+
+function ChatPanel({ context }: { context: ChatContext }) {
+  // Parent remounts this component via `key` whenever the selection changes,
+  // which naturally resets all state — no reset effect needed.
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [input, setInput] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
+  }, [messages, busy])
+
+  const send = async (text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed || busy) return
+    const next: ChatMessage[] = [...messages, { role: 'user', content: trimmed }]
+    setMessages(next)
+    setInput('')
+    setBusy(true)
+    setErr(null)
+    try {
+      const r = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: next,
+          entity: context.entity,
+          id: context.id,
+          kind: context.kind,
+        }),
+      })
+      if (!r.ok) {
+        const msg = await r.text().catch(() => '')
+        throw new Error(`HTTP ${r.status}: ${msg.slice(0, 200)}`)
+      }
+      const data = (await r.json()) as { reply: string }
+      setMessages([...next, { role: 'assistant', content: data.reply }])
+    } catch (e) {
+      setErr(`Chat failed: ${e}`)
+      setMessages(next.slice(0, -1)) // roll back the user message on error
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const suggestions = [
+    'What am I looking at?',
+    'What are the most interesting features?',
+    'How far away is this?',
+    'How was this image captured?',
+  ]
+
+  return (
+    <div className="chat-panel">
+      <div className="chat-header">
+        <h3>💬 Ask the astronomer</h3>
+        <span className="muted">
+          Chat with a vision LLM about this image — and astronomy in general.
+        </span>
+      </div>
+
+      <div className="chat-messages" ref={scrollRef}>
+        {messages.length === 0 && !busy && (
+          <div className="chat-empty">
+            <p className="muted">
+              Ask anything about this image or the universe. The model can see the
+              current view.
+            </p>
+            <div className="chat-suggestions">
+              {suggestions.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  className="chat-suggestion"
+                  onClick={() => send(s)}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} className={`chat-msg chat-msg-${m.role}`}>
+            <div className="chat-msg-role">
+              {m.role === 'user' ? 'You' : '🔭 Astronomer'}
+            </div>
+            <div className="chat-msg-body">{m.content}</div>
+          </div>
+        ))}
+        {busy && (
+          <div className="chat-msg chat-msg-assistant">
+            <div className="chat-msg-role">🔭 Astronomer</div>
+            <div className="chat-msg-body muted">Thinking…</div>
+          </div>
+        )}
+      </div>
+
+      {err && <p className="error">{err}</p>}
+
+      <form
+        className="chat-input-row"
+        onSubmit={(e) => {
+          e.preventDefault()
+          send(input)
+        }}
+      >
+        <input
+          type="text"
+          className="chat-input"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="Ask about this image or anything in astronomy…"
+          disabled={busy}
+        />
+        <button type="submit" disabled={busy || !input.trim()}>
+          {busy ? '…' : 'Send'}
+        </button>
+      </form>
+    </div>
+  )
+}
+
 function App() {
   const [tab, setTab] = useState<Tab>('featured')
   const [targets, setTargets] = useState<Target[]>([])
@@ -769,6 +901,27 @@ function App() {
                     <p className="explain-text">{explain.explanation}</p>
                   )}
                 </div>
+              )}
+
+              {!(selected.kind === 'apod' && selected.apod.media_type !== 'image') && (
+                <ChatPanel
+                  key={
+                    selected.kind === 'transient'
+                      ? `x-${selected.transient.oid}-${stampKind}`
+                      : (selectedKey ?? 'none')
+                  }
+                  context={
+                    selected.kind === 'target'
+                      ? { entity: 'target', id: selected.target.id }
+                      : selected.kind === 'apod'
+                        ? { entity: 'apod', id: selected.apod.date }
+                        : {
+                            entity: 'transient',
+                            id: selected.transient.oid,
+                            kind: stampKind,
+                          }
+                  }
+                />
               )}
 
               {selected.kind === 'transient' && (

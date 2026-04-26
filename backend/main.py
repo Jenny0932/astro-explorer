@@ -491,6 +491,158 @@ class ExplainRequest(BaseModel):
     context: str | None = None
 
 
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    entity: str  # "target" | "apod" | "transient"
+    id: str
+    kind: str | None = None  # for transients: science|template|difference
+
+
+CHAT_SYSTEM_PROMPT = (
+    "You are a world-class astronomer and astronomy educator — think of the "
+    "user's personal astronomy tutor. The user is viewing a specific telescope "
+    "image in an interactive explorer, and is chatting with you about it. The "
+    "image is attached to the first user message so you can see it directly.\n\n"
+    "Your job:\n"
+    "- Answer questions about the image itself: what's visible, what the objects "
+    "  are, why they look the way they do.\n"
+    "- Answer broader astronomy questions the user asks — cosmology, stellar "
+    "  evolution, instruments, transients, observation techniques, history.\n"
+    "- Be accurate, specific, and engaging. Favor concrete facts (distances, "
+    "  timescales, physical mechanisms) over vague handwaving.\n"
+    "- Keep responses reasonably concise (a few short paragraphs max) unless "
+    "  the user asks for depth.\n"
+    "- If you don't know something, or the image is ambiguous, say so honestly "
+    "  rather than inventing.\n"
+    "- Don't invent coordinates, magnitudes, or catalog IDs that aren't given."
+)
+
+
+def _load_chat_image(
+    entity: str, obj_id: str, kind: str | None
+) -> tuple[Image.Image, str]:
+    """Return (PIL image, context description) for the given entity/id/kind."""
+    if entity == "target":
+        t = _find_target(obj_id)
+        pil = _pil_from_url(t["image_url"])
+        context = f"JWST press-release image — {t['name']}. {t['blurb']}"
+        return pil, context
+
+    if entity == "apod":
+        entries = _fetch_apod_range(30)
+        e = _find_apod(entries, obj_id)
+        if e["media_type"] != "image":
+            raise HTTPException(status_code=415, detail="APOD entry is not an image")
+        pil = _pil_from_url(e["image_url"])
+        context = (
+            f"NASA Astronomy Picture of the Day for {e.get('date')} — "
+            f"{e.get('title')}. {e.get('explanation', '')}"
+        )
+        return pil, context
+
+    if entity == "transient":
+        k = kind or "difference"
+        if k not in ("science", "template", "difference"):
+            raise HTTPException(
+                status_code=400, detail="kind must be science|template|difference"
+            )
+        candid = _latest_stamped_candid(obj_id)
+        if k == "difference":
+            sci_url = (
+                f"{ALERCE_STAMPS}?oid={obj_id}&candid={candid}&type=science&format=png"
+            )
+            tmp_url = (
+                f"{ALERCE_STAMPS}?oid={obj_id}&candid={candid}&type=template&format=png"
+            )
+            gray = _normalized_residual(_fetch_gray(sci_url), _fetch_gray(tmp_url))
+            pil = _pil_from_gray(gray)
+            input_note = (
+                "normalized residual (science z-score − template z-score, "
+                "remapped so 128 = zero, brighter = new source)"
+            )
+        else:
+            url = f"{ALERCE_STAMPS}?oid={obj_id}&candid={candid}&type={k}&format=png"
+            pil = _pil_from_url(url)
+            input_note = f"ALeRCE {k} stamp"
+        context = (
+            f"ZTF transient {obj_id}, {k} cutout ({input_note}). "
+            "Cutouts are ~60×60 arcsec around the variable/transient source."
+        )
+        return pil, context
+
+    raise HTTPException(status_code=400, detail=f"Unknown entity: {entity}")
+
+
+@app.post("/api/chat")
+def chat(req: ChatRequest) -> dict[str, Any]:
+    if not req.messages:
+        raise HTTPException(status_code=400, detail="messages cannot be empty")
+    if req.messages[-1].role != "user":
+        raise HTTPException(status_code=400, detail="last message must be from user")
+
+    pil, context = _load_chat_image(req.entity, req.id, req.kind)
+
+    # Resize + encode once; we attach the image to the first user turn so the
+    # model has it in conversation context for the full dialogue.
+    img = pil.copy()
+    img.thumbnail((768, 768))
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    system_content = f"{CHAT_SYSTEM_PROMPT}\n\nCurrent image context: {context}"
+
+    openai_messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_content}
+    ]
+    first_user_seen = False
+    for m in req.messages:
+        if m.role not in ("user", "assistant"):
+            raise HTTPException(status_code=400, detail=f"invalid role: {m.role}")
+        if m.role == "user" and not first_user_seen:
+            openai_messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": m.content},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{b64}"},
+                        },
+                    ],
+                }
+            )
+            first_user_seen = True
+        else:
+            openai_messages.append({"role": m.role, "content": m.content})
+
+    try:
+        resp = _openai().chat.completions.create(
+            model=OPENAI_MODEL,
+            max_tokens=600,
+            messages=openai_messages,
+        )
+    except OpenAIError as e:
+        raise HTTPException(
+            status_code=502, detail=f"OpenAI chat call failed: {e}"
+        ) from e
+
+    usage = resp.usage
+    return {
+        "model": OPENAI_MODEL,
+        "reply": (resp.choices[0].message.content or "").strip(),
+        "tokens": {
+            "input": usage.prompt_tokens if usage else None,
+            "output": usage.completion_tokens if usage else None,
+        },
+    }
+
+
 def _pil_from_gray(gray: np.ndarray) -> Image.Image:
     arr = np.clip(gray, 0, 255).astype(np.uint8)
     return Image.fromarray(arr, mode="L")

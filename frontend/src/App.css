@@ -433,6 +433,126 @@ button.secondary:hover:not(:disabled) {
   white-space: pre-wrap;
 }
 
+.chat-panel {
+  margin-top: 20px;
+  padding: 16px 20px;
+  background: linear-gradient(135deg, rgba(107, 141, 255, 0.06), rgba(164, 122, 255, 0.06));
+  border: 1px solid #2e3356;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.chat-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #e0e3ff;
+}
+
+.chat-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 440px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.chat-empty {
+  padding: 12px 0;
+}
+
+.chat-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.chat-suggestion {
+  background: transparent;
+  color: #c0c4e8;
+  border: 1px solid #2e3356;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.chat-suggestion:hover:not(:disabled) {
+  background: rgba(123, 157, 255, 0.12);
+  transform: none;
+}
+
+.chat-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  max-width: 92%;
+}
+
+.chat-msg-user {
+  align-self: flex-end;
+  background: linear-gradient(135deg, rgba(107, 141, 255, 0.22), rgba(164, 122, 255, 0.22));
+  border: 1px solid rgba(164, 122, 255, 0.35);
+}
+
+.chat-msg-assistant {
+  align-self: flex-start;
+  background: rgba(20, 24, 60, 0.55);
+  border: 1px solid rgba(123, 157, 255, 0.2);
+}
+
+.chat-msg-role {
+  font-size: 0.7rem;
+  color: #8b90b8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.chat-msg-body {
+  color: #e0e3ff;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.chat-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.chat-input {
+  flex: 1;
+  background: rgba(10, 12, 30, 0.7);
+  border: 1px solid #2e3356;
+  color: #e6e8ff;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+
+.chat-input:focus {
+  outline: none;
+  border-color: #7b9dff;
+}
+
+.chat-input:disabled {
+  opacity: 0.6;
+}
+
 .muted {
   color: #8b90b8;
   font-size: 0.9rem;
